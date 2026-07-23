@@ -1,0 +1,25 @@
+version: "3.3"
+
+services:
+  yyb:
+    image: ghcr.io/zhuanke8/yyb:latest
+    container_name: yyb
+    restart: unless-stopped
+    # 直接使用 Docker 内置 bridge，不创建 yyb_api_default 一类的 Compose 项目网络。
+    network_mode: bridge
+    ports:
+      - "18273:18273"
+    environment:
+      YYB_USERDATA: "/data"
+      YYB_HOST: "0.0.0.0"
+      YYB_API_PORT: "18273"
+      YYB_ADMIN_TOKEN: ""
+      YYB_COOKIE_SECURE: "0"
+      YYB_PANEL_TLS_VERIFY: "0"
+      YYB_TRUST_PROXY: "1"
+      YYB_CLIENT_IP_HEADER: "X-Real-IP"
+    volumes:
+      # 宿主机仓库直接覆盖镜像中的 /app，修改源码后只需重启容器。
+      - ./:/app
+      # 运行数据独立放在宿主机 data 目录。
+      - ./data:/data

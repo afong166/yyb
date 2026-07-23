@@ -1,0 +1,12 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+httpx[socks]>=0.27
+python-socks[asyncio]>=2.4
+async-timeout>=4.0; python_version < "3.11"
+cryptography>=42.0
+lz4>=4.3
+bcrypt>=4.1
+segno>=1.6
+requests[socks]>=2.31
+python-multipart>=0.0.9
+pycryptodome>=3.20
