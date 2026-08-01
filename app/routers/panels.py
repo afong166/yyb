@@ -6,6 +6,7 @@ import re
 from fastapi import APIRouter, HTTPException, Request
 
 from .. import auth, db, deps, models, panels_ext
+from ..config import PANEL_ALLOW_PRIVATE
 from ..util import get_body, guard_public_url
 
 router = APIRouter()
@@ -43,7 +44,8 @@ async def save_panel(request: Request, ptype: str):
     base_url = (b.get("baseUrl") or "").strip()
     if not re.match(r"^https?://", base_url):
         raise HTTPException(400, "面板地址需以 http(s):// 开头")
-    guard_public_url(base_url)  # SSRF 防护：禁止指向内网/环回地址
+    # 面板通常自托管在内网/环回，默认放行私网地址（可用 YYB_PANEL_ALLOW_PRIVATE=0 收紧）
+    guard_public_url(base_url, allow_private=PANEL_ALLOW_PRIVATE)
     client_id = b.get("clientId") or ""
     secret = b.get("clientSecret") or ""
     existing = db.query_one("SELECT * FROM panels WHERE user_id=? AND panel_type=?", (uid, ptype))
@@ -73,7 +75,7 @@ async def test_panel(request: Request, ptype: str):
     secret = b.get("clientSecret") or (auth.secretbox_decrypt(existing["client_secret_enc"]) if existing else "")
     if not base_url or (not secret and not client_id):
         return {"success": True, "ok": False, "error": "请先填写面板地址与密钥"}
-    guard_public_url(base_url)  # SSRF 防护：禁止指向内网/环回地址
+    guard_public_url(base_url, allow_private=PANEL_ALLOW_PRIVATE)
     res = await panels_ext.test_connection(ptype, {"baseUrl": base_url, "clientId": client_id, "clientSecret": secret})
     if existing:
         db.execute("UPDATE panels SET last_test_at=?, last_test_ok=? WHERE id=?",

@@ -620,7 +620,8 @@ async def run_wanglaoji_project(user_id: int, openid: str, appid: str, params: d
     # 代理：优先本次表单填写的 proxyUrl；留空则回退到该微信账号扫码时绑定的地区代理，
     # 让王老吉接口与账号同地区出网，避免异地 IP 触发风控。
     _acc = db.query_one("SELECT proxy_url FROM accounts WHERE openid=?", (openid,))
-    proxy_url = (params.get("proxyUrl") or "").strip() or ((_acc["proxy_url"] or "") if _acc else "")
+    from .shortproxy import project_proxy
+    proxy_url = project_proxy(params, openid)
 
     # 实时日志：边跑边推（前端可实时看到扫码/抽奖/领取进度）
     lines: list[str] = []

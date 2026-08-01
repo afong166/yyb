@@ -1,78 +1,44 @@
-# 应用宝纯协议 Docker 版
+# 应用宝纯协议 1.1.8 · 51短效代理版
 
-这是一个 FastAPI + SQLite 服务，包含已构建的用户端/管理端前端。镜像同时包含
-Python 3.11 与 Node.js；Node.js 用于饿了么参数和益禾堂签名计算。
+仓库镜像：`ghcr.io/zhuanke8/yyb:latest`。
 
-> 本项目会保存微信及第三方平台登录凭据，并可能执行签到、抽奖、领取等奖励操作。
-> 只应处理你有权使用的账号。公开仓库前，请确认你有权再分发仓库中的源码、前端产物
-> 及 `eleme_assets` 第三方资源，并自行补充合适的开源许可证。
+## 51短效代理
 
-## 从 GHCR 运行
+管理员登录 `/admin`，进入「短效代理」，由前端提交 51代理 API提取页面生成的完整 URL。
+API 保持页面生成的原始 `http://` 或 `https://`，并明文保存在 SQLite `admin_config` 中。
+普通用户只能选择省市，看不到完整 API。
+
+- 短效 SOCKS 地址不写入数据库；每次开始登录、续期或项目业务操作时都重新向 51代理提取。
+- 二维码创建、扫码轮询和 OAuth 交换共享登录预算，整个登录流程最多使用 10 个代理。
+- 手动续期、定时自动续期和运行态续期使用同一规则，整个续期流程最多使用 5 个代理。
+- 呼和浩特（150100）始终使用服务器本机 IP，不请求 51代理。
+- 扫码和 token 续期使用账号代理；获取 Code 保持上游 1.1.8 行为，使用本机直连。
+- 项目、定时任务和云托管支持账号默认、直连、长效代理及 51短效地区。
+
+## Docker Compose
 
 ```bash
-docker compose pull
 docker compose up -d
 docker compose logs -f yyb
 ```
 
-默认访问地址为 `http://服务器IP:18273/`，管理后台为 `/admin`。首次启动生成的
-管理员令牌可在 `data/yyb-admin-token.txt` 中查看。
+Compose 固定使用 `ghcr.io/zhuanke8/yyb:latest`，直接运行镜像内由 GitHub 工作流打包的
+后端、饿了么资源和前端，只把运行数据持久化到宿主机 `./data`。
 
-宿主机 `./data` 保存 SQLite 数据库、密钥、日志、二维码和设备 ID。升级或重建容器
-不会删除这些数据。目录内含敏感凭据，不要提交或公开。
+默认地址为 `http://服务器IP:18273/`，管理后台为 `/admin`。
 
-宿主机当前仓库会直接挂载到容器 `/app`，因此 Python、前端静态文件或 Node.js 资源
-都可以直接在本地修改。普通源码修改后只需要：
+## GitHub Packages
 
-```bash
-docker compose restart yyb
+推送到 `zhuanke8/yyb` 的 `main` 或 `master` 后，工作流会编译两套 Vue 前端，
+并发布 amd64/arm64 镜像：
+
+```text
+ghcr.io/zhuanke8/yyb:latest
 ```
 
-不需要重新构建镜像。只有修改 `requirements.txt`、Dockerfile 或系统依赖时，才需要
-重新构建并发布镜像。
+推送 `v1.1.8` 标签会额外发布 `1.1.8` 和 `1.1`。
 
-Compose 使用 Docker 自带的 `bridge` 网络，不会自动创建 `yyb_api_default` 项目网络。
+## 注意
 
-## GitHub Actions 发布
-
-工作流位于 `.github/workflows/docker-publish.yml`，行为如下：
-
-- 推送到默认分支：发布 `ghcr.io/zhuanke8/yyb:latest`、分支标签和 SHA 标签。
-- 推送 `v1.2.3` 标签：额外发布 `1.2.3` 和 `1.2`。
-- Pull Request：只验证构建，不推送镜像。
-- 同时构建 `linux/amd64` 和 `linux/arm64`，附带 SBOM 与 provenance。
-
-仓库首次发布后，在 GitHub 的 **Packages → Package settings → Change visibility**
-中把包改成 **Public**，全网用户即可匿名拉取。GitHub 默认的 `GITHUB_TOKEN` 已由工作流
-的 `packages: write` 权限用于推送，无需另建 PAT。
-
-## HTTPS 与反向代理
-
-直接使用 HTTP 时，`compose.yaml` 中保持：
-
-```yaml
-YYB_COOKIE_SECURE: "0"
-YYB_TRUST_PROXY: "0"
-```
-
-放到可信 Nginx/Caddy HTTPS 反代后，在 `compose.yaml` 中改为：
-
-```yaml
-YYB_COOKIE_SECURE: "1"
-YYB_TRUST_PROXY: "1"
-YYB_CLIENT_IP_HEADER: "X-Real-IP"
-```
-
-并确保反代覆盖而不是透传客户端提交的 `X-Real-IP`。不要将数据目录、管理员令牌或
-18273 后端端口直接暴露给不可信网络。
-
-## 备份
-
-单实例运行即可，不要配置多个 Uvicorn worker，否则定时任务可能重复执行。备份时建议
-先停止容器，再整体备份 `data/`：
-
-```bash
-docker compose stop yyb
-tar -czf yyb-data-backup.tgz data
-docker compose start yyb
-```
+51 API 现在按需求明文存储，`data/app.db` 包含套餐凭据，不应公开、提交或分享。
+抓包文件同样包含登录 Cookie、Token 和代理账号凭据，不要加入仓库。

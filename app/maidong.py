@@ -7,26 +7,39 @@ code through codebridge, then performs Maidong login and optional scan/lottery.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
-import uuid
+import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
 
 from .logsink import emit as _emit
+from .turing_device_token import DEFAULT_PROFILE, generate_device_token
 
 APP_ID = os.environ.get("MAIDONG_APPID", "wxef2336428c3873d2")
 B2B_BASE = os.environ.get("MAIDONG_B2B_BASE", "https://b2b.danonewaters.com.cn")
 ACTIVITY_CODE = os.environ.get("MAIDONG_ACTIVITY_CODE", "UTC202603311335149717")
+PACKAGE_VERSION = os.environ.get("MAIDONG_PACKAGE_VERSION", "55")
+TLS_VERIFY = os.environ.get("MAIDONG_TLS_VERIFY", "1").strip().lower() not in ("0", "false", "no", "off")
 DEFAULT_LATITUDE = os.environ.get("MAIDONG_LATITUDE", "26.4247216796875")
 DEFAULT_LONGITUDE = os.environ.get("MAIDONG_LONGITUDE", "112.84228569878472")
 DEFAULT_DELAY_BETWEEN_SCANS = float(os.environ.get("MAIDONG_DELAY_BETWEEN_SCANS", "90"))
+SIGN_SECRET = "secretKeyFor1664Xcx"
+TURING_STATE_DIR = Path(
+    os.environ.get(
+        "MAIDONG_TURING_STATE_DIR",
+        str(Path(__file__).resolve().parents[1] / "data" / "turing"),
+    )
+)
 
 REFERER = os.environ.get(
-    "MAIDONG_REFERER", "https://servicewechat.com/wxef2336428c3873d2/53/page-frame.html"
+    "MAIDONG_REFERER",
+    f"https://servicewechat.com/wxef2336428c3873d2/{PACKAGE_VERSION}/page-frame.html",
 )
 UA = os.environ.get(
     "MAIDONG_USER_AGENT",
@@ -50,7 +63,25 @@ def _split_sns(raw: Any) -> list[str]:
 
 
 def _sn_tail(sn: str) -> str:
-    return str(sn or "").rstrip("/").rsplit("/", 1)[-1]
+    value = str(sn or "").rstrip("/").rsplit("/", 1)[-1]
+    return f"***{value[-4:]}" if len(value) >= 4 else "***"
+
+
+def _redact_values(value: Any, sensitive_values: tuple[Any, ...]) -> Any:
+    """递归清理上游响应中的账号凭证、wx code、deviceToken 和完整瓶盖码。"""
+    if isinstance(value, dict):
+        return {key: _redact_values(item, sensitive_values) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_values(item, sensitive_values) for item in value]
+    if not isinstance(value, str):
+        return value
+
+    text = value
+    for sensitive in sensitive_values:
+        secret = str(sensitive or "")
+        if len(secret) >= 4:
+            text = text.replace(secret, "[REDACTED]")
+    return text
 
 
 def _summary(data: dict[str, Any]) -> dict[str, Any]:
@@ -82,9 +113,11 @@ class MaidongClient:
     def __init__(self, proxy_url: str = "") -> None:
         self.base_url = B2B_BASE.rstrip("/")
         kw = {"proxy": proxy_url} if proxy_url else {}
-        self.client = httpx.AsyncClient(timeout=30.0, verify=False, **kw)
+        self.client = httpx.AsyncClient(timeout=30.0, verify=TLS_VERIFY, **kw)
+        self.proxy_url = proxy_url
         self.token = ""
         self.openid = ""
+        self.device_token = ""
         self.user: dict[str, Any] = {}
 
     async def aclose(self) -> None:
@@ -100,13 +133,42 @@ class MaidongClient:
 
     def auth_headers(self) -> dict[str, str]:
         headers = self.base_headers()
+        timestamp = str(int(time.time() * 1000))
         headers.update({
             "authorization": f"Bearer {self.token}",
             "openid": self.openid,
-            "sign": uuid.uuid4().hex,
-            "devicetoken": "v3:" + uuid.uuid4().hex,
+            "timeStamp": timestamp,
+            "sign": hashlib.sha512(f"{timestamp}{SIGN_SECRET}".encode()).hexdigest(),
         })
+        if self.device_token:
+            headers["deviceToken"] = self.device_token
         return headers
+
+    async def init_device_token(self, *, plugin_login_code: str = "", force_refresh: bool = False) -> dict[str, Any]:
+        """登录拿到脉动 openId 后，通过 Turing 纯协议生成真实 deviceToken。"""
+        if not self.openid:
+            raise RuntimeError("Maidong openId is empty before Turing initialization")
+
+        profile = json.loads(json.dumps(DEFAULT_PROFILE))
+        profile["plugin_login_code"] = plugin_login_code
+        state_name = hashlib.sha256(self.openid.encode()).hexdigest() + ".json"
+        result = await asyncio.to_thread(
+            generate_device_token,
+            self.openid,
+            state_path=TURING_STATE_DIR / state_name,
+            profile=profile,
+            force_refresh=force_refresh,
+            proxy_url=self.proxy_url,
+        )
+        token = str(result.get("deviceToken") or "")
+        if result.get("ret") != 0 or not token.startswith("v3:"):
+            raise RuntimeError(f"Turing deviceToken invalid: source={result.get('source')} ret={result.get('ret')}")
+        self.device_token = token
+        return {
+            "source": result.get("source"),
+            "ret": result.get("ret"),
+            "length": len(token),
+        }
 
     async def request_json(self, method: str, path: str, *, params=None, json_body=None, auth: bool = True) -> dict:
         url = self.base_url + path
@@ -121,9 +183,18 @@ class MaidongClient:
         try:
             data = resp.json()
         except Exception as exc:
-            raise RuntimeError(f"{method} {url} returned non-JSON: HTTP {resp.status_code} {resp.text[:200]}") from exc
+            raise RuntimeError(f"{method} {path} returned non-JSON: HTTP {resp.status_code}") from exc
         if resp.status_code >= 400:
-            raise RuntimeError(f"{method} {url} HTTP {resp.status_code}: {data}")
+            code = data.get("code") if isinstance(data, dict) else ""
+            message = data.get("message") if isinstance(data, dict) else ""
+            request_secrets: list[Any] = [self.token, self.openid, self.device_token]
+            for values in (params, json_body):
+                if isinstance(values, dict):
+                    request_secrets.extend(
+                        values.get(key) for key in ("code", "sn", "scanUrl", "mobile", "openId")
+                    )
+            message = _redact_values(str(message or ""), tuple(request_secrets))[:300]
+            raise RuntimeError(f"{method} {path} HTTP {resp.status_code}: code={code} message={message}")
         return data
 
     async def login(self, login_code: str, sn: str) -> dict:
@@ -134,7 +205,8 @@ class MaidongClient:
             auth=False,
         )
         if str(data.get("code")) != "200" or not data.get("data"):
-            raise RuntimeError(f"Maidong login failed: {data.get('message') or data}")
+            message = _redact_values(str(data.get("message") or ""), (login_code, sn))[:300]
+            raise RuntimeError(f"Maidong login failed: code={data.get('code')} message={message or '-'}")
         self.token = str(data["data"])
         extend = data.get("extend") or {}
         self.openid = str(extend.get("openId") or "")
@@ -242,12 +314,14 @@ def _needs_phone_auth(item: dict[str, Any]) -> bool:
     scan = item.get("scan") or {}
     message = str(scan.get("message") or scan.get("errorMessage") or scan.get("data") or "")
     code = str(scan.get("code") or "")
-    return "授权手机号" in message or "手机号" in message and code in ("50000", "500", "401")
+    # 注意运算符优先级：需要 (含关键词) and (命中错误码)，否则 `A or B and C` 会解析成 `A or (B and C)`，
+    # 导致任何含「授权手机号」的消息无视 code 直接触发补授权。
+    return ("授权手机号" in message or "手机号" in message) and code in ("50000", "500", "401")
 
 
 async def _run_one_sn(client: MaidongClient, sn: str, activity_code: str,
                       latitude: str, longitude: str, do_lottery: bool) -> dict:
-    item: dict[str, Any] = {"sn": sn, "snTail": _sn_tail(sn)}
+    item: dict[str, Any] = {"snTail": _sn_tail(sn)}
     try:
         item["timesBefore"] = (await client.query_times(activity_code)).get("data")
     except Exception as exc:
@@ -279,7 +353,8 @@ async def _run_one_sn(client: MaidongClient, sn: str, activity_code: str,
     prizes = (await client.prize_records(activity_code)).get("data") or {}
     item["prizeTotal"] = prizes.get("total", 0)
     item["prizes"] = _prizes(prizes.get("records") or [])
-    return item
+    sn_value = str(sn or "").rstrip("/").rsplit("/", 1)[-1]
+    return _redact_values(item, (sn, sn_value))
 
 
 def _item_lines(item: dict[str, Any]) -> list[str]:
@@ -330,24 +405,30 @@ async def run_maidong_project(user_id: int, openid: str, appid: str, params: dic
     # 代理：优先本次表单填写的 proxyUrl；留空则回退到该微信账号扫码时绑定的地区代理，
     # 让脉动 danone B2B 接口与账号同地区出网，避免异地 IP 触发风控。
     _acc = db.query_one("SELECT proxy_url FROM accounts WHERE openid=?", (openid,))
-    proxy_url = (params.get("proxyUrl") or "").strip() or ((_acc["proxy_url"] or "") if _acc else "")
+    from .shortproxy import project_proxy
+    proxy_url = project_proxy(params, openid)
 
     cr = await get_code_for_openid(openid, target_appid)
     if not cr.get("success") or not cr.get("code"):
-        return {"ok": False, "stage": "get-code", "error": cr.get("error") or "failed to get Maidong code"}
+        error = _redact_values(str(cr.get("error") or "failed to get Maidong code"), (openid,))
+        return {"ok": False, "stage": "get-code", "error": error}
 
     client = MaidongClient(proxy_url=proxy_url)
     try:
         login = await client.login(cr["code"], sns[0])
+        turing = await client.init_device_token(
+            plugin_login_code=str(params.get("pluginLoginCode") or os.environ.get("MAIDONG_PLUGIN_LOGIN_CODE", "")),
+            force_refresh=_bool_param(params, "refreshDeviceToken", False),
+        )
         user = (login.get("extend") or {}).get("user") or {}
         result: dict[str, Any] = {
             "ok": True,
             "stage": "maidong",
-            "code": cr["code"],
-            "sn": sns[0],
             "snCount": len(sns),
             "delayBetweenScans": delay_between_scans if len(sns) > 1 else 0,
             "viaProxy": bool(proxy_url),
+            "deviceTokenSource": turing["source"],
+            "deviceTokenLength": turing["length"],
             "account": _mask(user.get("id") or client.openid),
             "openid": _mask(client.openid),
             "userId": _mask(user.get("id")),
@@ -374,6 +455,10 @@ async def run_maidong_project(user_id: int, openid: str, appid: str, params: dic
             _emit(line)
 
         rlog(f"[INFO] ▶ 账号：{result.get('account') or '-'}")
+        rlog(
+            f"[SUCCESS] Turing deviceToken 已生成"
+            f"（来源 {result['deviceTokenSource']}，长度 {result['deviceTokenLength']}）"
+        )
         if result.get("activityName"):
             rlog(f"[INFO] 活动：{result['activityName']}")
         if result.get("prepareUser") == "ok":
@@ -399,7 +484,10 @@ async def run_maidong_project(user_id: int, openid: str, appid: str, params: dic
                         item = await _run_one_sn(client, sn, activity_code, latitude, longitude, do_lottery)
                         item["retriedAfterPhoneAuth"] = True
                     except Exception as exc:
-                        item["phoneAuthError"] = str(exc)
+                        item["phoneAuthError"] = _redact_values(
+                            str(exc),
+                            (openid, client.openid, client.token, client.device_token, sn),
+                        )
                 for ln in _item_lines(item):
                     rlog(ln)
                 result["results"].append(item)
@@ -424,8 +512,24 @@ async def run_maidong_project(user_id: int, openid: str, appid: str, params: dic
         result["maidongResult"] = json.dumps(display, ensure_ascii=False, indent=2)
         # 复用内置项目结果文本框：统一成 [LEVEL] 日志行（与其他项目一致）
         result["cookie"] = "\n".join(run_lines)
-        return result
+        return _redact_values(
+            result,
+            (openid, cr.get("code"), client.openid, client.token, client.device_token, *sns),
+        )
     except Exception as exc:
-        return {"ok": False, "stage": "maidong", "error": str(exc), "code": cr.get("code")}
+        sensitive_values = (
+            openid,
+            proxy_url,
+            cr.get("code"),
+            client.openid,
+            client.token,
+            client.device_token,
+            *sns,
+        )
+        return {
+            "ok": False,
+            "stage": "maidong",
+            "error": _redact_values(str(exc), sensitive_values),
+        }
     finally:
         await client.aclose()

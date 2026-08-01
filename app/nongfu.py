@@ -654,7 +654,8 @@ async def run_nongfu_project(user_id: int, openid: str, appid: str, params: dict
     # 代理：优先本次表单填写的 proxyUrl；留空则回退该微信账号扫码时绑定的地区代理，
     # 让农夫山泉 yst 接口与账号同地区出网，避免异地 IP 触发风控。
     _acc = db.query_one("SELECT proxy_url FROM accounts WHERE openid=?", (openid,))
-    proxy_url = (params.get("proxyUrl") or "").strip() or ((_acc["proxy_url"] or "") if _acc else "")
+    from .shortproxy import project_proxy
+    proxy_url = project_proxy(params, openid)
 
     # 先取一枚 code（校验账号可用），并作为活动身份种子 wx.login code。
     cr = await get_code_for_openid(openid, target_appid)
@@ -705,7 +706,8 @@ async def run_nongfu_project(user_id: int, openid: str, appid: str, params: dict
         activity_name = ""
         # 预检（仅日志展示，不影响主链路）
         try:
-            rlog(f"[INFO] 活动时间：{结果摘要(runner.检查活动时间())}")
+            _act_time = await asyncio.to_thread(runner.检查活动时间)  # 同步 requests，勿在事件循环上直接阻塞
+            rlog(f"[INFO] 活动时间：{结果摘要(_act_time)}")
         except Exception as exc:
             rlog(f"[WARNING] 活动时间查询失败：{脱敏手机号(str(exc))}")
         try:

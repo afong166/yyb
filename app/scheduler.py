@@ -108,10 +108,12 @@ async def _run_project_task(task, log_fn) -> tuple[int, int]:
             log_fn(f"[ERROR] {name}：账号不属于你或已删除")
             continue
         try:
+            from . import shortproxy
+            run_params = await asyncio.to_thread(shortproxy.resolve_params, uid, openid, params, "account")
             if is_action:
-                result = await ACTION_RUNNERS[builtin](uid, openid, appid, {**rc, **params})
+                result = await ACTION_RUNNERS[builtin](uid, openid, appid, {**rc, **run_params})
             else:
-                result = await CODE_LOGIN_RUNNERS[builtin](uid, openid, appid, params.get("proxyUrl") or "")
+                result = await CODE_LOGIN_RUNNERS[builtin](uid, openid, appid, run_params.get("proxyUrl") or "")
         except Exception as exc:
             log_fn(f"[ERROR] {name}：{exc}")
             continue
@@ -185,8 +187,15 @@ async def execute_and_store(task, live_log_fn=None) -> dict:
     return {"status": status, "log": text, "lastRunAt": now}
 
 
+def reset_stale_running() -> None:
+    """启动时把上次进程异常退出遗留的 running 状态重置为 fail，避免任务永远卡在「运行中」。"""
+    with contextlib.suppress(Exception):
+        db.execute("UPDATE scheduled_tasks SET last_status='fail' WHERE last_status='running'")
+
+
 async def scheduler_loop() -> None:
     """常驻循环：每 30s 扫到期任务，先前推 next_run_at 再执行。"""
+    reset_stale_running()
     while True:
         await asyncio.sleep(30)
         try:
@@ -200,7 +209,12 @@ async def scheduler_loop() -> None:
                 # 先把下一次算好写回，避免本轮执行耗时导致下一轮重复触发同一条
                 db.execute("UPDATE scheduled_tasks SET next_run_at=? WHERE id=?",
                            (compute_next_ms(task["cron"]), task["id"]))
-                with contextlib.suppress(Exception):
+                try:
                     await execute_and_store(task)
+                except Exception:
+                    # 不再静默吞掉：记日志并把状态落成 fail，避免卡在 running
+                    log.exception("execute scheduled task %s failed", task["id"])
+                    with contextlib.suppress(Exception):
+                        db.execute("UPDATE scheduled_tasks SET last_status='fail' WHERE id=?", (task["id"],))
         except Exception:
             log.exception("scheduler loop tick failed")

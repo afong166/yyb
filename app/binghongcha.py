@@ -431,7 +431,8 @@ async def run_binghongcha_project(user_id: int, openid: str, appid: str, params:
     # 代理：优先本次表单填写的 proxyUrl；留空则回退到该微信账号扫码时绑定的地区代理，
     # 让冰红茶 1l26.ksf.cn 接口与账号同地区出网，避免异地 IP 触发风控。
     _acc = db.query_one("SELECT proxy_url FROM accounts WHERE openid=?", (openid,))
-    proxy_url = (params.get("proxyUrl") or "").strip() or ((_acc["proxy_url"] or "") if _acc else "")
+    from .shortproxy import project_proxy
+    proxy_url = project_proxy(params, openid)
 
     cr = await get_code_for_openid(openid, target_appid or APPID)
     if not cr.get("success") or not cr.get("code"):

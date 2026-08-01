@@ -6,7 +6,12 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+# 定时任务统一按中国（上海）时区计算：中国全年 UTC+8、无夏令时，用固定偏移即等价 Asia/Shanghai，
+# 且不依赖系统 tzdata。这样无论服务器（常见 Docker/海外机为 UTC）本地时区如何，
+# 「每天 08:00」都稳定表示北京时间 08:00。
+CN_TZ = timezone(timedelta(hours=8))
 
 # field index -> (lo, hi)：秒 分 时 日 月 周
 _BOUNDS = {
@@ -62,6 +67,9 @@ def _minute_matches(fields: list[str], dt: datetime) -> bool:
     cron_dow = (dt.weekday() + 1) % 7  # python Mon=0..Sun=6 → cron Sun=0..Sat=6
     d_dom = _field_match(dom, dt.day, 1, 31)
     d_dow = _field_match(_norm_dow(dow), cron_dow, 0, 6)
+    # 周日既是 0 也是 7：范围写法(如 5-7)里的 7 不会被 _norm_dow 归一，这里对周日补测一次 7。
+    if not d_dow and cron_dow == 0:
+        d_dow = _field_match(dow, 7, 0, 7)
     if dom.strip() == "*" or dow.strip() == "*":
         return d_dom and d_dow
     return d_dom or d_dow
@@ -102,10 +110,19 @@ def validate(expr: str) -> list[str]:
 
 
 def next_run(expr: str, after: datetime | None = None) -> datetime | None:
-    """算 after 之后的下一次触发时间（本地时间，naive，秒级）。无匹配返回 None。"""
+    """算 after 之后的下一次触发时间（中国上海时区，aware，秒级）。无匹配返回 None。
+
+    返回带 CN_TZ 时区的 datetime，调用方 .timestamp() 即得到正确的 UTC 毫秒，
+    不受服务器本地时区影响。传入的 naive `after` 一律按中国时区解释。
+    """
     fields = validate(expr)
     sec_f = fields[0]
-    start = (after or datetime.now()).replace(microsecond=0) + timedelta(seconds=1)
+    base = after or datetime.now(CN_TZ)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=CN_TZ)
+    else:
+        base = base.astimezone(CN_TZ)
+    start = base.replace(microsecond=0) + timedelta(seconds=1)
     minute_dt = start.replace(second=0)
     for _ in range(366 * 24 * 60):
         if _minute_matches(fields, minute_dt):

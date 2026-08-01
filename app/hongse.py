@@ -986,7 +986,7 @@ class HongseRunner:
                 "pending_red_packet_amount": pending_red_packet_amount,
                 "claimed_amount": claimed_amount,
             }
-        except RuntimeError as exc:
+        except Exception as exc:  # 不止 RuntimeError：任何上游异常都要收敛为失败，勿逃逸成 500
             self.log(f"❌ 异常: {exc}")
             return None
 
@@ -997,16 +997,25 @@ async def run_hongse_project(user_id: int, openid: str, appid: str, params: dict
     params = params or {}
     loop = asyncio.get_running_loop()
     _acc = db.query_one("SELECT proxy_url, nickname FROM accounts WHERE openid=?", (openid,))
-    proxy_url = (params.get("proxyUrl") or "").strip() or ((_acc["proxy_url"] or "") if _acc else "")
+    from .shortproxy import project_proxy
+    proxy_url = project_proxy(params, openid)
     display = (_acc["nickname"] if _acc and _acc["nickname"] else openid)
 
     runner = HongseRunner(loop=loop, openid=openid, proxy_url=proxy_url, params=params)
-    result = await asyncio.to_thread(runner.run_account, display)
+    try:
+        result = await asyncio.to_thread(runner.run_account, display)
+    finally:
+        try:
+            runner.session.close()  # 显式释放连接，避免多账号连跑积累 socket/FD
+        except Exception:
+            pass
 
     summary = result or {"success": False, "display": display}
+    ok = bool(summary.get("success"))
     text = "\n".join(runner.lines) or "（无输出）"
     return {
-        "ok": True,
+        "ok": ok,
+        "error": None if ok else (summary.get("error") or "红色任务执行失败"),
         "stage": "hongse",
         "account": display,
         "viaProxy": bool(proxy_url),

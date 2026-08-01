@@ -16,7 +16,7 @@ setup_logging()
 
 from . import auth, codebridge, db, scheduler, yyblogin
 from .config import ADMIN_TOKEN, API_HOST, API_PORT, DIST_ADMIN, DIST_USER
-from .routers import accounts, admin, auth as auth_r, code, info, licenses, login, panels, projects, tasks
+from .routers import accounts, admin, auth as auth_r, code, info, licenses, login, panels, projects, proxy, tasks
 from .util import client_ip
 
 # /api 访问日志跳过的高频路径（扫码轮询已由 checkQr 语义日志按状态变化打点，避免刷屏）
@@ -267,10 +267,20 @@ async def lifespan(app: FastAPI):
     await codebridge.startup()
 
     async def renew_loop():
+        from . import svc
+        from .config import RECORD_RETENTION_DAYS
+        last_purge = 0.0
         while True:
             await asyncio.sleep(180)
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(yyblogin.auto_renew_tick)
+            # 每天清理一次超期的调用记录/审计日志，防止单库无限膨胀
+            if RECORD_RETENTION_DAYS > 0 and (time.time() - last_purge) > 86400:
+                last_purge = time.time()
+                with contextlib.suppress(Exception):
+                    n = await asyncio.to_thread(svc.purge_old_records, RECORD_RETENTION_DAYS)
+                    if n:
+                        event("maintenance", "清理超期记录", 删除行数=n, 保留天数=RECORD_RETENTION_DAYS)
 
     task = asyncio.create_task(renew_loop())
     sched = asyncio.create_task(scheduler.scheduler_loop())
@@ -340,6 +350,8 @@ app.include_router(code.wx_router, prefix="/wx")
 app.include_router(projects.router, prefix="/api/projects")
 app.include_router(tasks.router, prefix="/api/tasks")
 app.include_router(panels.router, prefix="/api/panels")
+app.include_router(proxy.router, prefix="/api/proxy")
+app.include_router(proxy.admin_router, prefix="/api/admin/proxy")
 app.include_router(info.router, prefix="/api")
 
 

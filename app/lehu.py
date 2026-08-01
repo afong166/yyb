@@ -680,6 +680,10 @@ def _run_sync(wx_code: str, codes: list[str], *, proxy: str, latitude: str, long
             time.sleep(interval)
 
     log(f"[INFO] 运行结束：处理 {len(results)} 个码，命中现金红包 {len(winners)} 个")
+    try:
+        runner.session.close()  # 释放连接，避免多码/多账号连跑积累 socket
+    except Exception:
+        pass
     return {
         "userId": runner.user_id,
         "token": runner.token,
@@ -712,7 +716,8 @@ async def run_lehu_project(user_id: int, openid: str, appid: str, params: dict |
     # 代理：优先本次表单填写的 proxyUrl；留空则回退到该微信账号扫码时绑定的地区代理，
     # 让 hzhuihe 达利接口与账号同地区出网，避免异地 IP 触发风控。
     _acc = db.query_one("SELECT proxy_url FROM accounts WHERE openid=?", (openid,))
-    proxy_url = (params.get("proxyUrl") or "").strip() or ((_acc["proxy_url"] or "") if _acc else "")
+    from .shortproxy import project_proxy
+    proxy_url = project_proxy(params, openid)
 
     cr = await get_code_for_openid(openid, target_appid)
     if not cr.get("success") or not cr.get("code"):

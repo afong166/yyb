@@ -33,12 +33,26 @@ def license_view(lic, uc: int | None = None) -> dict:
 
 
 def account_view(a) -> dict:
+    from .shortproxy import account_mode, safe_proxy_label
+    mode = account_mode(a)
+    region_name = (a["proxy_region_name"] if "proxy_region_name" in a.keys() else "") or ""
+    if mode == "short":
+        proxy_label = f"短效代理 · {region_name}" if region_name else "短效代理"
+    elif mode == "long":
+        proxy_label = safe_proxy_label(a["proxy_url"] or "")
+    else:
+        proxy_label = "直连"
     return {
         "openid": a["openid"], "nickname": a["nickname"] or "", "unionid": a["unionid"] or "",
         "headImgUrl": a["head_img_url"] or "", "loggedAt": a["logged_at"] or 0,
         "expireAt": a["expire_at"] or 0, "hasSession": False,
         "isCurrent": bool(a["is_current"]), "status": a["status"] or "active",
         "statusError": a["status_error"] or None,
+        "loginSource": (a["login_source"] if "login_source" in a.keys() else 1) or 1,
+        "proxyMode": mode,
+        "proxyRegionCode": (a["proxy_region_code"] if "proxy_region_code" in a.keys() else "") or "",
+        "proxyRegionName": region_name,
+        "proxyLabel": proxy_label,
     }
 
 

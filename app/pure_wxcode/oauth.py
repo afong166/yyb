@@ -23,6 +23,13 @@ WX_QRCONNECT_REDIRECT = "https://yybadaccess.3g.qq.com/pc_yyb/pcyyb_oauth?login_
 WX_QRCONNECT_URL = "https://open.weixin.qq.com/connect/qrconnect"
 YYB_BASE = "https://yybadaccess.3g.qq.com"
 
+# SYZS (手游助手) 专用配置 —— 独立的 WeChat appid 和 redirect_uri（逆向自 pc.syzs.qq.com 前端 JS）
+#   th = {WX: "wxef99873dbfab493c", QC: "101549767"}
+SYZS_WX_QRCONNECT_APPID = "wxef99873dbfab493c"
+SYZS_QRCONNECT_REDIRECT = f"{YYB_BASE}/syzslogin/syzs_oauth?login_type=wx&domain=1&syzs_prefix="
+SYZS_OAUTH_URL = f"{YYB_BASE}/v3/syzs_get_wx_login_buffer_auth"
+SYZS_LOGIN_BUFFER_URL = f"{YYB_BASE}/syzslogin/syzs_login_buffer"
+
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -89,11 +96,13 @@ def _new_session() -> requests.Session:
     )
     return s
 
-def build_qrconnect_url(state: str, fast_login: bool = True) -> str:
+def build_qrconnect_url(state: str, fast_login: bool = True,
+                        redirect_uri: str = "",
+                        appid: str = "") -> str:
     query = urlencode(
         {
-            "appid": WX_QRCONNECT_APPID,
-            "redirect_uri": WX_QRCONNECT_REDIRECT,
+            "appid": appid or WX_QRCONNECT_APPID,
+            "redirect_uri": redirect_uri or WX_QRCONNECT_REDIRECT,
             "response_type": "code",
             "scope": WX_QRCONNECT_SCOPE,
             "fast_login": 1 if fast_login else 0,
@@ -141,10 +150,15 @@ class QrSession:
     longpoll_host: str
     session: requests.Session = field(repr=False, default=None)
 
-def fetch_qr(session: Optional[requests.Session] = None, state: str = "") -> QrSession:
+def fetch_qr(session: Optional[requests.Session] = None, state: str = "",
+             redirect_uri: str = "",
+             appid: str = "") -> QrSession:
+    """生成微信扫码 QR 会话。
+    redirect_uri 为空时走 YYB（应用宝）回调；传 SYZS_QRCONNECT_REDIRECT 时走手游助手回调。
+    appid 为空时用 YYB 的 appid；传 SYZS_WX_QRCONNECT_APPID 时用手游助手的 appid。"""
     s = session or _new_session()
     state = state or f"{int(time.time() * 1000)}{_now() % 10000:04d}"
-    page_url = build_qrconnect_url(state)
+    page_url = build_qrconnect_url(state, redirect_uri=redirect_uri, appid=appid)
 
     s.get(page_url, headers={"Referer": WX_QRCONNECT_URL}, timeout=20)
 
@@ -179,6 +193,105 @@ def fetch_qr(session: Optional[requests.Session] = None, state: str = "") -> QrS
         longpoll_host=longpoll_host,
         session=s,
     )
+
+# ── SYZS (手游助手) OAuth 交换 & login_buffer ──
+def syzs_oauth_exchange(wx_code: str,
+                        state: str = "",
+                        session: Optional[requests.Session] = None) -> dict[str, Any]:
+    """用 wx_code 向 SYZS redirect_uri 端点交换 tokens/cookies（三重提取 cookies+Location+JSON）。"""
+    s = session or _new_session()
+    url = f"{SYZS_QRCONNECT_REDIRECT}&code={wx_code}&state={state}"
+    resp = s.get(url, headers={"Referer": SYZS_QRCONNECT_REDIRECT}, allow_redirects=False, timeout=25)
+    cookies = {c.name: c.value for c in s.cookies}
+    location = resp.headers.get("Location", "")
+    body_text = resp.content.decode("utf-8", "ignore")
+    loc_sources: dict[str, str] = {}
+    if location:
+        pu = urlparse(location)
+        for part in (pu.query, pu.fragment):
+            for k, v in parse_qs(part).items():
+                loc_sources[k] = unquote(v[0]) if v else ""
+    json_body: dict = {}
+    try:
+        json_body = json.loads(body_text)
+        if not isinstance(json_body, dict):
+            json_body = {"_root": json_body}
+    except Exception:
+        json_body = {}
+    flat_json = dict(json_body)
+    for nest_key in ("data", "extInfo", "result", "userInfo"):
+        nv = json_body.get(nest_key)
+        if isinstance(nv, dict):
+            flat_json.update(nv)
+    tokens = _extract_tokens_from_sources({"location": loc_sources, "cookies": cookies, "json": flat_json})
+    for canon, keys in _TOKEN_KEYS.items():
+        val = tokens.get(canon, "")
+        if val:
+            for k in keys:
+                if k not in cookies:
+                    cookies[k] = val
+                    break
+    return {
+        "ok": bool(cookies) and bool(tokens.get("openid")) and bool(tokens.get("access_token")),
+        "cookies": cookies, "tokens": tokens,
+        "http_status": resp.status_code, "location": location,
+    }
+
+
+def syzs_oauth_cookie(wx_code: str, session: Optional[requests.Session] = None) -> dict[str, Any]:
+    """POST {"code":"<wx_code>"} 到 SYZS OAuth 端点获取 cookies（含 pc_yyb_auth 签名 cookie）。"""
+    s = session or _new_session()
+    resp = s.post(
+        SYZS_OAUTH_URL, json={"code": wx_code},
+        headers={"Content-Type": "application/json", "Referer": "https://pc.syzs.qq.com/"},
+        timeout=25,
+    )
+    cookies = {c.name: c.value for c in s.cookies}
+    return {"ok": bool(cookies), "cookies": cookies, "http_status": resp.status_code}
+
+
+def _syzs_signed_headers(cookies: dict[str, str]) -> dict[str, str]:
+    """SYZS 签名头：Nonce(32hex) + Timestamp + Sign=MD5(nonce+timestamp+cookies['pc_yyb_auth'])。"""
+    import hashlib
+    import secrets as _secrets
+    nonce = _secrets.token_hex(16)
+    timestamp = str(int(time.time()))
+    auth_val = cookies.get("pc_yyb_auth", "")
+    sign = hashlib.md5((nonce + timestamp + auth_val).encode("utf-8")).hexdigest()
+    return {"X-SYZS-Nonce": nonce, "X-SYZS-Timestamp": timestamp, "X-SYZS-Sign": sign}
+
+
+def syzs_get_login_buffer(wx_code: str, cookies: dict[str, str],
+                          session: Optional[requests.Session] = None) -> dict[str, Any]:
+    """用 wx_code + 签名头向 SYZS 端点获取 login_buffer（兼容扁平 key 与嵌套 ext_info 结构）。"""
+    s = session or _new_session()
+    headers = _syzs_signed_headers(cookies)
+    headers["Content-Type"] = "application/json"
+    headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    resp = s.post(SYZS_LOGIN_BUFFER_URL, json={"code": wx_code}, headers=headers, timeout=25)
+    data: dict = {}
+    try:
+        data = resp.json()
+    except Exception:
+        pass
+    login_buffer = data.get("loginBuffer") or data.get("login_buffer") or ""
+    openid = data.get("openid") or data.get("openId") or ""
+    if not login_buffer:
+        ext = data.get("ext_info") or data.get("extInfo") or {}
+        list_s = ext.get("list_s") or ext.get("listS") or {}
+        lb = list_s.get("login_buffer") or {}
+        if isinstance(lb, dict):
+            vals = lb.get("value") or []
+            if vals:
+                login_buffer = vals[0]
+        oid = list_s.get("openid") or {}
+        if isinstance(oid, dict):
+            vals = oid.get("value") or []
+            if vals:
+                openid = vals[0]
+    return {"ok": bool(login_buffer), "login_buffer": login_buffer,
+            "openid": openid, "http_status": resp.status_code, "raw": data}
+
 
 def _open_file(path: Path) -> bool:
     import os
@@ -250,13 +363,17 @@ def poll_for_code(
     last_state = ""
     for idx in range(max_polls):
         url = _build_longpoll_url(qr.longpoll_host, qr.uuid, last)
-        try:
-            r = s.get(url, headers={"Referer": qr.page_url}, timeout=poll_timeout)
-        except requests.Timeout:
-            continue
+        # 微信实测约 17 秒返回一次 408 waiting；35 秒仍无响应不是正常轮询，
+        # 应把超时交给上层判定代理失效，而不是静默吞掉后继续占用二维码会话。
+        r = s.get(url, headers={"Referer": qr.page_url}, timeout=poll_timeout)
+        r.raise_for_status()
         body = r.content.decode("utf-8", "ignore")
         m_err = _ERRCODE_RE.search(body)
         m_code = _CODE_RE.search(body)
+        if not m_err and not m_code:
+            # 代理网关偶尔返回 200 错误页；若当成 errcode=-1 连跑 120 次，
+            # 会在几秒内把有效二维码误报为过期。
+            raise requests.ConnectionError("微信二维码轮询响应格式异常")
         errcode = int(m_err.group(1)) if m_err else -1
         wx_code = m_code.group(1) if m_code else ""
 

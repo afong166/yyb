@@ -615,7 +615,8 @@ async def run_husheng_project(user_id: int, openid: str, appid: str, params: dic
 
     # 代理：优先本次表单填的 proxyUrl；留空回退到该微信账号绑定的地区代理，业务接口与取码同地区出网防风控。
     _acc = db.query_one("SELECT proxy_url, nickname FROM accounts WHERE openid=?", (openid,))
-    proxy_url = (params.get("proxyUrl") or "").strip() or ((_acc["proxy_url"] or "") if _acc else "")
+    from .shortproxy import project_proxy
+    proxy_url = project_proxy(params, openid)
     nickname = (_acc["nickname"] if _acc and _acc["nickname"] else "")
     proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
 

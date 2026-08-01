@@ -664,7 +664,8 @@ async def run_ksf_project(user_id: int, openid: str, appid: str, params: dict | 
     # 代理：优先本次表单填写的 proxyUrl；留空则回退到该微信账号扫码时绑定的地区代理，
     # 让康师傅业务接口与账号同地区出网，避免异地 IP 触发风控。
     _acc = db.query_one("SELECT proxy_url, nickname FROM accounts WHERE openid=?", (openid,))
-    proxy_url = (params.get("proxyUrl") or "").strip() or ((_acc["proxy_url"] or "") if _acc else "")
+    from .shortproxy import project_proxy
+    proxy_url = project_proxy(params, openid)
     account_disp = 脱敏(_acc["nickname"] if (_acc and _acc["nickname"]) else openid)
 
     # 先取 code（会员登录种子）；失败直接返回 get-code 错误
@@ -692,6 +693,11 @@ async def run_ksf_project(user_id: int, openid: str, appid: str, params: dict | 
         # 兜底：把已产生的日志随错误一起带回，便于定位
         runner.log(f"[ERROR] 运行异常：{脱敏手机号(str(exc))}")
         return {"ok": False, "stage": "ksf", "error": str(exc), "cookie": "\n".join(runner.lines)}
+    finally:
+        try:
+            runner.session.close()  # 释放 curl_cffi/requests 连接，避免多账号连跑积累 socket
+        except Exception:
+            pass
 
     display = {
         "account": account_disp,

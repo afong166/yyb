@@ -351,7 +351,8 @@ class NongwuRunner:
             time.sleep(random.uniform(1, 2))
 
     # ---------------- 单账号编排 ----------------
-    def run_account(self, username: str, code_dtm: str | None, code_wlx: str | None) -> None:
+    def run_account(self, username: str, code_dtm: str | None, code_wlx: str | None) -> bool:
+        """执行单账号任务；返回是否至少成功登录到一个小程序（供上层如实上报成功/失败）。"""
         # 1. dtmiller 登录 + 签到
         token_dtm = None
         if code_dtm:
@@ -366,11 +367,11 @@ class NongwuRunner:
         # 2. wlnxjc 登录
         if not code_wlx:
             self.log(username, "wlnxjc Code 获取失败，跳过抽奖", "WARNING")
-            return
+            return bool(token_dtm)
         token_wlx = self.get_token_wlnxjc(code_wlx)
         if not token_wlx:
             self.log(username, "wlnxjc Token 获取失败，跳过抽奖", "WARNING")
-            return
+            return bool(token_dtm)
         draw_activity_id = self.get_draw_activity_id(token_wlx)
 
         # 3. 积分校验
@@ -402,6 +403,7 @@ class NongwuRunner:
                 self.receive(token_wlx, record_id, username)
         else:
             self.log(username, "今日抽奖次数已达上限，停止抽奖", "WARNING")
+        return True
 
 
 async def run_nongwu_project(user_id: int, openid: str, appid: str, params: dict | None = None) -> dict:
@@ -411,7 +413,8 @@ async def run_nongwu_project(user_id: int, openid: str, appid: str, params: dict
     params = params or {}
     # 代理：优先本次表单填的 proxyUrl；留空则回退到该微信账号绑定的地区代理，业务接口与取码同地区出网防风控。
     _acc = db.query_one("SELECT proxy_url, nickname FROM accounts WHERE openid=?", (openid,))
-    proxy_url = (params.get("proxyUrl") or "").strip() or ((_acc["proxy_url"] or "") if _acc else "")
+    from .shortproxy import project_proxy
+    proxy_url = project_proxy(params, openid)
     username = (_acc["nickname"] if _acc and _acc["nickname"] else openid)
     proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
 
@@ -426,7 +429,7 @@ async def run_nongwu_project(user_id: int, openid: str, appid: str, params: dict
 
     runner = NongwuRunner(proxies)
     # 任务全是同步 requests + sleep，丢到线程里跑，避免阻塞事件循环
-    await asyncio.to_thread(runner.run_account, username, code_dtm, code_wlx)
+    ok = bool(await asyncio.to_thread(runner.run_account, username, code_dtm, code_wlx))
 
     summary: dict[str, Any] = {
         "account": username,
@@ -437,7 +440,8 @@ async def run_nongwu_project(user_id: int, openid: str, appid: str, params: dict
     }
     text = "\n".join(runner.lines) or "（无输出）"
     return {
-        "ok": True,
+        "ok": ok,
+        "error": None if ok else "两个小程序均登录失败",
         "stage": "nongwu",
         "account": username,
         "viaProxy": bool(proxy_url),

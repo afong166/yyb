@@ -1,0 +1,136 @@
+/* ============================================================
+   用户端设计系统 —— 纯白 · 干净 · 克制的精致
+   蓝色品牌强调；柔和阴影、细边框、留白、克制动效。
+   ============================================================ */
+:root {
+  --brand: #2f6bf6;
+  --brand-600: #245ae0;
+  --brand-50: #eef3ff;
+  --ink: #1a1f2b;
+  --ink-2: #59616f;
+  --ink-3: #9aa2af;
+  --line: #eef0f4;
+  --line-2: #e6e9ef;
+  --canvas: #f7f9fc;
+  --surface: #ffffff;
+  --radius: 14px;
+  --radius-sm: 10px;
+  --shadow-sm: 0 1px 2px rgba(20, 30, 55, 0.05), 0 1px 1px rgba(20, 30, 55, 0.04);
+  --shadow: 0 6px 22px rgba(30, 45, 90, 0.07);
+  --shadow-lg: 0 18px 50px rgba(30, 45, 90, 0.13);
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+
+  /* Element Plus 主题对齐 */
+  --el-color-primary: #2f6bf6;
+  --el-border-radius-base: 10px;
+  --el-font-family: 'Segoe UI', system-ui, -apple-system, 'Microsoft YaHei', sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  color: var(--ink);
+  font-family: 'Segoe UI', system-ui, -apple-system, 'Microsoft YaHei', 'PingFang SC', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* 极淡的双点光晕，避免纯色板的干燥 */
+  background:
+    radial-gradient(900px 500px at 100% -5%, rgba(47, 107, 246, 0.06), transparent 60%),
+    radial-gradient(700px 500px at -5% 105%, rgba(47, 107, 246, 0.045), transparent 55%),
+    var(--canvas);
+  background-attachment: fixed;
+}
+
+h1, h2, h3 { letter-spacing: -0.01em; color: var(--ink); }
+
+/* 卡片：白面 + 细边 + 柔影，悬浮微抬 */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 22px;
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow 0.25s var(--ease), transform 0.25s var(--ease), border-color 0.25s var(--ease);
+}
+.card.hover {
+  transition: box-shadow 0.25s var(--ease), transform 0.18s var(--ease), border-color 0.25s var(--ease);
+  cursor: pointer;
+}
+.card.hover:hover {
+  box-shadow: var(--shadow);
+  border-color: var(--line-2);
+  transform: translateY(-2px);
+}
+.card.hover:active { transform: translateY(-1px) scale(0.995); }
+
+/* 统计数字卡 */
+.stat .n { font-variant-numeric: tabular-nums; }
+
+/* 入场：错落淡入上浮 */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.rise { opacity: 0; animation: fadeUp 0.5s var(--ease) forwards; }
+.rise-1 { animation-delay: 0.04s; }
+.rise-2 { animation-delay: 0.10s; }
+.rise-3 { animation-delay: 0.16s; }
+.rise-4 { animation-delay: 0.22s; }
+
+/* 路由切换过渡：快出慢入，跟手不拖沓 */
+.page-enter-active { transition: opacity 0.22s var(--ease), transform 0.22s var(--ease); }
+.page-leave-active { transition: opacity 0.12s var(--ease), transform 0.12s var(--ease); }
+.page-enter-from { opacity: 0; transform: translateY(8px); }
+.page-leave-to { opacity: 0; transform: translateY(-5px); }
+
+/* Element Plus 微调：更圆润的表格 + 更有手感的按钮 */
+.el-button { transition: transform 0.1s var(--ease), box-shadow 0.2s var(--ease), background-color 0.2s var(--ease); }
+.el-button:hover { transform: translateY(-1px); }
+.el-button:active { transform: translateY(1px) scale(0.97); }
+.el-button--primary { box-shadow: 0 6px 16px rgba(47, 107, 246, 0.22); }
+.el-button--primary:hover { box-shadow: 0 9px 22px rgba(47, 107, 246, 0.3); }
+.el-button--primary:active { box-shadow: 0 3px 10px rgba(47, 107, 246, 0.24); }
+.el-card, .el-dialog { border-radius: var(--radius) !important; }
+.el-table { --el-table-border-color: var(--line); background: transparent; }
+.el-table th.el-table__cell { background: #fafbfe !important; color: var(--ink-2); font-weight: 600; }
+.el-table__inner-wrapper tr:hover > td { background: var(--brand-50) !important; }
+.el-tag { border-radius: 6px; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #d9dee7; border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: #c3cad6; background-clip: padding-box; }
+
+/* 尊重「减少动效」偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+  .rise { opacity: 1; }
+}
+
+/* ============================================================
+   移动端通用适配（桌面端不受影响）
+   Element Plus 组件默认用固定像素宽，在窄屏会溢出，这里统一收敛。
+   ============================================================ */
+@media (max-width: 600px) {
+  /* 对话框：无论内联多宽，都收敛到 92vw 内并顶部留白 */
+  .el-dialog { width: min(92vw, 480px) !important; margin: 8vh auto 24px !important; }
+  .el-dialog__body { padding: 12px 18px; }
+
+  /* 抽屉：固定宽度改为几乎占满屏 */
+  .el-drawer.rtl, .el-drawer.ltr { width: 90% !important; }
+  .el-drawer.ttb, .el-drawer.btt { height: 78% !important; }
+
+  /* 消息弹窗 / 确认框 */
+  .el-message-box { width: calc(100vw - 32px) !important; max-width: 400px; }
+  .el-message { min-width: 0; width: calc(100vw - 24px); }
+
+  /* 卡片内边距收紧，给内容更多横向空间 */
+  .card { padding: 16px; }
+
+  /* 下拉/选择弹层不超出视口 */
+  .el-select__popper, .el-popper { max-width: calc(100vw - 20px); }
+}
+
+/* 全局防止意外的横向溢出 */
+img, video, pre { max-width: 100%; }
+

@@ -1,9 +1,19 @@
-"""共享服务：审计、授权码生成/发放/更新。"""
+"""共享服务：审计、授权码生成/发放/更新、旧记录清理。"""
 from __future__ import annotations
 
 import secrets
 
 from . import db, models
+
+
+def purge_old_records(days: int) -> int:
+    """删除超过 days 天的 call_records / audit 记录；days<=0 时不清理。返回删除总行数。"""
+    if days <= 0:
+        return 0
+    cutoff = db.now() - days * 86400 * 1000
+    n = db.execute_rowcount("DELETE FROM call_records WHERE created_at < ?", (cutoff,))
+    n += db.execute_rowcount("DELETE FROM audit WHERE created_at < ?", (cutoff,))
+    return n
 
 _LIC_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 

@@ -292,6 +292,15 @@ class YihetangRunner:
 
     def do_sign(self, cookie: str, sign_id: str) -> str:
         s = self._sign_session(cookie, sign_id)
+        try:
+            return self._do_sign_with(s, sign_id)
+        finally:
+            try:
+                s.close()  # 每次签到用独立 Session，用完即关，避免连跑积累 socket
+            except Exception:
+                pass
+
+    def _do_sign_with(self, s: requests.Session, sign_id: str) -> str:
         before_score = self._query_credits(s)
         status = self._query_sign_status(s, sign_id)
         zero_score = str(before_score) in ("0", "0.0", "None", "")
@@ -337,7 +346,8 @@ async def run_yihetang_project(user_id: int, openid: str, appid: str, params: di
 
     # 代理：优先本次表单填的 proxyUrl；留空则回退到该微信账号绑定的地区代理，业务接口与取码同地区出网防风控。
     _acc = db.query_one("SELECT proxy_url, nickname FROM accounts WHERE openid=?", (openid,))
-    proxy_url = (params.get("proxyUrl") or "").strip() or ((_acc["proxy_url"] or "") if _acc else "")
+    from .shortproxy import project_proxy
+    proxy_url = project_proxy(params, openid)
     username = (_acc["nickname"] if _acc and _acc["nickname"] else openid)
     proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
 
@@ -348,6 +358,8 @@ async def run_yihetang_project(user_id: int, openid: str, appid: str, params: di
     if not cr.get("success") or not cr.get("code"):
         return {"ok": False, "stage": "get-code", "error": cr.get("error") or "取益禾堂小程序 code 失败"}
 
+    ok = False
+    err = None
     try:
         # 2. 登录换 qm-user-token
         token, login_data = await asyncio.to_thread(runner.login, cr["code"])
@@ -373,7 +385,9 @@ async def run_yihetang_project(user_id: int, openid: str, appid: str, params: di
         # 5. 执行签到（同步 requests + Node，丢线程里跑避免阻塞事件循环）
         msg = await asyncio.to_thread(runner.do_sign, cookie, sign_id)
         runner.log(f"{username}：{msg}", "SUCCESS")
+        ok = True
     except Exception as exc:
+        err = str(exc)
         runner.log(f"{username}：签到异常：{exc}", "ERROR")
 
     summary: dict[str, Any] = {
@@ -383,7 +397,8 @@ async def run_yihetang_project(user_id: int, openid: str, appid: str, params: di
     }
     text = "\n".join(runner.lines) or "（无输出）"
     return {
-        "ok": True,
+        "ok": ok,
+        "error": None if ok else (err or "益禾堂签到失败"),
         "stage": "yihetang",
         "account": username,
         "viaProxy": bool(proxy_url),

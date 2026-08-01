@@ -46,7 +46,10 @@ CREATE TABLE IF NOT EXISTS accounts (
   nickname TEXT DEFAULT '', head_img_url TEXT DEFAULT '', unionid TEXT DEFAULT '',
   sex INTEGER DEFAULT 0, country TEXT DEFAULT '', province TEXT DEFAULT '', city TEXT DEFAULT '',
   proxy_url TEXT DEFAULT '', status TEXT DEFAULT 'active', status_error TEXT DEFAULT '',
-  is_current INTEGER DEFAULT 0, logged_at INTEGER DEFAULT 0, updated_at INTEGER DEFAULT 0
+  is_current INTEGER DEFAULT 0, logged_at INTEGER DEFAULT 0, updated_at INTEGER DEFAULT 0,
+  login_source INTEGER DEFAULT 1,
+  proxy_mode TEXT DEFAULT 'direct',
+  proxy_region_code TEXT DEFAULT '', proxy_region_name TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS call_records (
@@ -137,6 +140,30 @@ def _migrate(c: sqlite3.Connection) -> None:
     cols = {r["name"] for r in c.execute("PRAGMA table_info(call_records)").fetchall()}
     if "code" not in cols:
         c.execute("ALTER TABLE call_records ADD COLUMN code TEXT DEFAULT ''")
+    # accounts.login_source —— 1=YYB(应用宝), 2=SYZS(手游助手)
+    acct_cols = {r["name"] for r in c.execute("PRAGMA table_info(accounts)").fetchall()}
+    if "login_source" not in acct_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN login_source INTEGER DEFAULT 1")
+    if "proxy_mode" not in acct_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN proxy_mode TEXT DEFAULT 'direct'")
+    if "proxy_region_code" not in acct_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN proxy_region_code TEXT DEFAULT ''")
+    if "proxy_region_name" not in acct_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN proxy_region_name TEXT DEFAULT ''")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_accounts_proxy_region "
+              "ON accounts(user_id, proxy_mode, proxy_region_code)")
+    # 存量账号的 socks5:// 代理一次性升级为 socks5h://（socks4→socks4a）：改用代理端 DNS，
+    # 修复异地代理本地解析导致的微信/业务站 TLS 握手 SSLEOFError（新登录已在写入前归一）。
+    c.execute("UPDATE accounts SET proxy_url='socks5h://'||substr(proxy_url,10) "
+              "WHERE proxy_url LIKE 'socks5://%'")
+    c.execute("UPDATE accounts SET proxy_url='socks4a://'||substr(proxy_url,10) "
+              "WHERE proxy_url LIKE 'socks4://%'")
+    # 老版本只有 proxy_url：非空视为长效代理，空值维持直连。短效模式只由新接口显式写入。
+    c.execute("UPDATE accounts SET proxy_mode='long' "
+              "WHERE COALESCE(proxy_url,'')<>'' AND COALESCE(proxy_mode,'direct')='direct'")
+    # 51 短效 SOCKS 回收后地址会变：清除旧版保存的地址并彻底移除缓存表。
+    c.execute("UPDATE accounts SET proxy_url='' WHERE proxy_mode='short'")
+    c.execute("DROP TABLE IF EXISTS short_proxy_cache")
     # 脉动扫码节奏由 65s 提升到 90s（对齐新版防风控节奏）：把存量项目里 <90 的间隔一次性抬到 90
     for row in c.execute("SELECT id, run_config FROM projects WHERE run_config LIKE '%maidong-scan%'").fetchall():
         try:
@@ -170,6 +197,14 @@ def execute(sql: str, params: tuple = ()) -> int:
         cur = conn().execute(sql, params)
         conn().commit()
         return cur.lastrowid
+
+
+def execute_rowcount(sql: str, params: tuple = ()) -> int:
+    """执行写语句并返回受影响行数（DELETE/UPDATE 用；execute() 返回 lastrowid 不适用）。"""
+    with _lock:
+        cur = conn().execute(sql, params)
+        conn().commit()
+        return cur.rowcount
 
 
 def now() -> int:

@@ -1,14 +1,22 @@
 """面板外部调用：青龙(qinglong)、呆呆(daidai)。鉴权取 token → 写环境变量 / 触发任务。"""
 from __future__ import annotations
 
+import asyncio
 import re
 from urllib.parse import unquote
 
 import httpx
 
-from .config import PANEL_TLS_VERIFY
+from .config import PANEL_TLS_VERIFY, PANEL_ALLOW_PRIVATE
+from .util import guard_public_url
 
 TIMEOUT = 15.0
+
+
+async def _guard_base(config) -> None:
+    """提交/测试时按当前 DNS 复检面板地址；面板允许私网时同样放行（与保存口径一致）。"""
+    await asyncio.to_thread(guard_public_url, config.get("baseUrl") or "",
+                            ("http", "https"), PANEL_ALLOW_PRIVATE)
 
 
 def _base(url: str) -> str:
@@ -151,6 +159,7 @@ async def _dd_upsert_env(config, name, value, remarks):
 # ---------------- 统一入口 ----------------
 async def test_connection(panel_type, config):
     try:
+        await _guard_base(config)
         return await (_ql_test(config) if panel_type == "qinglong" else _dd_test(config))
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -158,6 +167,7 @@ async def test_connection(panel_type, config):
 
 async def submit_env(panel_type, config, env):
     try:
+        await _guard_base(config)
         fn = _ql_upsert_env if panel_type == "qinglong" else _dd_upsert_env
         return await fn(config, env["name"], env["value"], env.get("remarks", ""))
     except Exception as e:

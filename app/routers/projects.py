@@ -8,7 +8,7 @@ import time
 
 from fastapi import APIRouter, HTTPException, Request
 
-from .. import db, deps, models, panels_ext, runstream
+from .. import db, deps, models, panels_ext, runstream, shortproxy
 from ..logsink import log_sink
 from ..jd import run_jd_code_login
 from ..eleme import run_eleme_code_login
@@ -31,6 +31,15 @@ from ..util import get_body, client_ip
 from .panels import get_panel_config
 
 router = APIRouter()
+
+
+async def _resolve_proxy_in(uid: int, openid: str, params: dict) -> dict:
+    """解析 account/direct/long/short，并把实际代理一次性传给业务运行器。"""
+    try:
+        return await asyncio.to_thread(shortproxy.resolve_params, uid, openid, params or {}, "account")
+    except (ValueError, RuntimeError, HTTPException) as exc:
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        raise HTTPException(400, detail)
 
 # 内置项目运行器（模块级，供项目运行接口与定时任务调度器共用）
 CODE_LOGIN_RUNNERS = {
@@ -120,6 +129,7 @@ async def run_project(request: Request, pid: int):
             raise HTTPException(400, "请选择要使用的微信账号")
         if openid not in deps.account_openids(uid):
             raise HTTPException(403, "该微信账号不属于你")
+        params = await _resolve_proxy_in(uid, openid, params)
         appid = rc.get("appid") or ""
         t0 = time.time()
         if builtin in ACTION_RUNNERS:
@@ -146,10 +156,13 @@ async def run_project(request: Request, pid: int):
 
 async def _run_builtin(uid: int, rc: dict, builtin: str, params: dict):
     openid = params.get("openid") or ""
+    params = await _resolve_proxy_in(uid, openid, params)
     appid = rc.get("appid") or ""
     if builtin in ACTION_RUNNERS:
-        return await ACTION_RUNNERS[builtin](uid, openid, appid, {**rc, **params})
-    return await CODE_LOGIN_RUNNERS[builtin](uid, openid, appid, params.get("proxyUrl") or "")
+        result = await ACTION_RUNNERS[builtin](uid, openid, appid, {**rc, **params})
+    else:
+        result = await CODE_LOGIN_RUNNERS[builtin](uid, openid, appid, params.get("proxyUrl") or "")
+    return result
 
 
 @router.post("/{pid}/run-start")

@@ -2,9 +2,13 @@
 .github
 .env
 .env.*
+!.env.example
 .venv
 .venv-*
+_testdata
 data
+node_modules
+dist
 __pycache__
 *.py[cod]
 *.db
@@ -12,4 +16,3 @@ __pycache__
 *.db-wal
 *.log
 *.zip
-_analysis_*

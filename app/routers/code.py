@@ -10,6 +10,8 @@ from fastapi.responses import JSONResponse
 from .. import db, deps
 from ..codebridge import (
     get_code_for_openid, invoke_cloud_for_openid, get_phone_for_openid,
+    get_userinfo_for_openid,
+    cloud_call_function_for_openid, cloud_call_container_for_openid,
     oauth_authorize_for_openid, oauth_confirm_for_openid,
 )
 from ..logs import actor_name, event, mask_id
@@ -124,18 +126,91 @@ async def get_phone(request: Request):
     return JSONResponse(status_code=200 if result.get("success") else 500, content=body)
 
 
+@router.post("/get-userinfo")
+async def get_userinfo(request: Request):
+    """wx.getUserInfo：返回 rawData/signature/encryptedData/iv（走 webapi_getuserinfo）。"""
+    b = await get_body(request)
+    uid, openid, appid = await _guard(request, b)
+    t0 = time.time()
+    result = await get_userinfo_for_openid(openid, appid)
+    result["_ms"] = int((time.time() - t0) * 1000)
+    result["_ip"] = client_ip(request)
+    _record(uid, openid, appid, "get-userinfo", result)
+    _log("getUserInfo", "获取用户信息", uid, appid, openid, result)
+    body = {k: v for k, v in result.items() if not k.startswith("_")}
+    return JSONResponse(status_code=200 if result.get("success") else 500, content=body)
+
+
+@router.post("/cloud-call-function")
+async def cloud_call_function(request: Request):
+    """wx.cloud.callFunction：调用小程序云函数（qbase_commapi/tcbapi_slowcallfunction_v2）。"""
+    b = await get_body(request)
+    uid, openid, appid = await _guard(request, b)
+    fn = b.get("functionName") or b.get("function_name") or ""
+    if not fn:
+        raise HTTPException(400, "functionName required")
+    fdata = b.get("functionData")
+    if fdata is None:
+        fdata = b.get("function_data") or {}
+    env = b.get("cloudEnv") or b.get("cloud_env") or ""
+    t0 = time.time()
+    result = await cloud_call_function_for_openid(openid, appid, fn, fdata, env)
+    result["_ms"] = int((time.time() - t0) * 1000)
+    result["_ip"] = client_ip(request)
+    _record(uid, openid, appid, "cloud-call-function", result)
+    _log("cloudCallFunction", "调用云函数", uid, appid, openid, result)
+    body = {k: v for k, v in result.items() if not k.startswith("_")}
+    return JSONResponse(status_code=200 if result.get("success") else 500, content=body)
+
+
+@router.post("/cloud-call-container")
+async def cloud_call_container(request: Request):
+    """wx.cloud.callContainer：调用小程序云托管容器（qbase_commapi/tcbapi_call_gateway）。"""
+    b = await get_body(request)
+    uid, openid, appid = await _guard(request, b)
+    cloud_host = b.get("cloudHost") or b.get("cloud_host") or ""
+    if not cloud_host:
+        raise HTTPException(400, "cloudHost required")
+    path = b.get("path") or ""
+    if not path:
+        raise HTTPException(400, "path required")
+    method = b.get("method") or "GET"
+    headers = b.get("headers") or {}
+    data = b.get("data") or ""
+    from .. import shortproxy
+    try:
+        proxy_params = await asyncio.to_thread(shortproxy.resolve_params, uid, openid, b, "account")
+    except (ValueError, RuntimeError, HTTPException) as exc:
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        raise HTTPException(400, detail)
+    proxy_url = proxy_params["proxyUrl"]
+    direct = bool(b.get("direct") or b.get("directMode") or False)
+    t0 = time.time()
+    result = await cloud_call_container_for_openid(openid, appid, cloud_host, path, method, headers, data, proxy_url, direct)
+    result["_ms"] = int((time.time() - t0) * 1000)
+    result["_ip"] = client_ip(request)
+    _record(uid, openid, appid, "cloud-call-container", result)
+    _log("cloudCallContainer", "调用云托管", uid, appid, openid, result)
+    body = {k: v for k, v in result.items() if not k.startswith("_")}
+    return JSONResponse(status_code=200 if result.get("success") else 500, content=body)
+
+
 @router.post("/oauth-authorize")
 async def oauth_authorize(request: Request):
-    """公众号 OAuth2 授权（cmdid=4313）：提交授权 URL，返回 scope_list/redirect_url。"""
+    """公众号 OAuth2 授权（cmdid=1254）：提交授权 URL，返回 scope_list/redirect_url（含 code）。
+    正确协议格式下，authorize 一步即可拿到 redirect_url(含code)，无需再调 confirm。"""
     b = await get_body(request)
     uid, openid, appid = await _guard(request, b)
     url = b.get("url") or b.get("oauth_url") or ""
     if not url:
         raise HTTPException(400, "url required")
     t0 = time.time()
+    # scene 默认 4（网页授权）；调用方显式传值时尊重入参
+    _scene = b.get("scene")
+    scene = 4 if _scene in (None, "") else int(_scene)
     result = await oauth_authorize_for_openid(
         openid, appid, url,
-        biz_username=b.get("biz_username") or "", scene=b.get("scene") or 0,
+        biz_username=b.get("biz_username") or "", scene=scene,
         referrer_url=b.get("referrer_url") or "", sub_scene=b.get("sub_scene"),
         auto_oauth=b.get("auto_oauth"))
     result["_ms"] = int((time.time() - t0) * 1000)
@@ -148,7 +223,8 @@ async def oauth_authorize(request: Request):
 
 @router.post("/oauth-authorize-confirm")
 async def oauth_authorize_confirm(request: Request):
-    """公众号 OAuth2 确认授权（cmdid=4313）：返回 redirect_url（含网页授权 code）。"""
+    """公众号 OAuth2 确认授权（cmdid=1255）：返回 redirect_url（含网页授权 code）。
+    注意：正确协议下 authorize 一步已含 code，此接口通常不需要调用。"""
     b = await get_body(request)
     uid, openid, appid = await _guard(request, b)
     oauth_url = b.get("oauth_url") or b.get("url") or ""

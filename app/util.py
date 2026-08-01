@@ -39,6 +39,28 @@ def client_ip(request: Request) -> str:
     return request.client.host if request.client else ""
 
 
+# ---------------- 代理规范化 ----------------
+def normalize_proxy_url(url: str) -> str:
+    """把 socks5:// 升级为 socks5h://（socks4:// → socks4a://），让 DNS 在代理端解析。
+
+    背景：socks5:// 是「本地解析 DNS」——服务器先把 open.weixin.qq.com 解析成
+    某个 CDN IP 再让代理连它。当服务器与代理出口不在同一网络时，这个本地解析的
+    IP 常与代理出口不匹配，导致 TLS 握手被对端 EOF，报
+    `SSLError(SSLEOFError(8, 'EOF occurred in violation of protocol'))`。
+    socks5h:// 让代理就近解析域名，可修复绝大多数「SOCKS5 拉二维码 SSLError」。
+    幂等：已是 socks5h/socks4a 或 http(s) 代理原样返回。
+    """
+    u = (url or "").strip()
+    if not u:
+        return u
+    low = u.lower()
+    if low.startswith("socks5://"):
+        return "socks5h://" + u[len("socks5://"):]
+    if low.startswith("socks4://"):
+        return "socks4a://" + u[len("socks4://"):]
+    return u
+
+
 # ---------------- SSRF 防护 ----------------
 def _ip_blocked(ip: str) -> bool:
     try:
@@ -49,11 +71,13 @@ def _ip_blocked(ip: str) -> bool:
             or addr.is_reserved or addr.is_multicast or addr.is_unspecified)
 
 
-def guard_public_url(url: str, allow_schemes: tuple[str, ...] = ("http", "https")) -> None:
-    """拒绝目标解析到内网/环回/保留地址的请求（SSRF 防护）。
+def guard_public_url(url: str, allow_schemes: tuple[str, ...] = ("http", "https"),
+                     allow_private: bool = False) -> None:
+    """校验请求目标；默认拒绝解析到内网/环回/保留地址（SSRF 防护）。
 
-    注意：这是解析期校验，无法完全消除 DNS 重绑定（TOCTOU）；对可信用户的自托管
-    场景足够，若需强隔离应在出站层固定已解析 IP。
+    allow_private=True 时放行私网/环回地址：面板（青龙/呆呆）几乎都自托管在
+    127.0.0.1 / 局域网 / docker 网络里，一律拦截会导致面板根本无法保存或使用。
+    注意：这是解析期校验，无法完全消除 DNS 重绑定（TOCTOU）；对可信自托管场景足够。
     """
     try:
         p = urlparse(url)
@@ -68,6 +92,8 @@ def guard_public_url(url: str, allow_schemes: tuple[str, ...] = ("http", "https"
         infos = socket.getaddrinfo(host, p.port, proto=socket.IPPROTO_TCP)
     except Exception:
         raise HTTPException(400, "无法解析目标主机名")
+    if allow_private:
+        return  # 面板等自托管场景：解析成功即放行，允许内网/环回地址
     for info in infos:
         if _ip_blocked(info[4][0]):
             raise HTTPException(403, "拒绝访问内网/环回/保留地址（SSRF 防护）")

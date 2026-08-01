@@ -88,7 +88,8 @@ def _lz4_compress(data: bytes) -> bytes:
     import lz4.block
     return lz4.block.compress(data, store_size=False)
 
-def build_cmd2881(uin: int, server_id: bytes, session_send_key: bytes, payload_protobuf: bytes) -> bytes:
+def build_cmd2881(uin: int, server_id: bytes, session_send_key: bytes, payload_protobuf: bytes,
+                  ilink_appid: str = "ilinkapp_060000b7b93f6c") -> bytes:
     import os as _os
     from . import ilink_packet as P
     comp = _lz4_compress(payload_protobuf)
@@ -98,7 +99,8 @@ def build_cmd2881(uin: int, server_id: bytes, session_send_key: bytes, payload_p
     return P.build_ilink_packet(CMD_WXARUNTIME_TRANSFER, body,
                                 crypto=P.CRYPTO_AESGCM, compress=4,
                                 extra_numeric={2: uin, 22: uin},
-                                extra_strings={27: server_id})
+                                extra_strings={27: server_id},
+                                ilink_appid=ilink_appid)
 
 def decrypt_cmd2881_body(session_key: bytes, ilink_packet: bytes) -> bytes:
     import lz4.block
@@ -226,9 +228,9 @@ def _pb_len(fid, data):
         data = data.encode()
     return bytes([(fid << 3) | 2]) + _v(len(data)) + data
 
-def _session_ctx(sessionkey_val: int, mac: str, id4: int) -> bytes:
+def _session_ctx(sessionkey_val: int, mac: str, id4: int, platform: str = "Windows") -> bytes:
     return (_pb_len(1, "sessionkey") + _pb_varint(2, sessionkey_val)
-            + _pb_len(3, mac) + _pb_varint(4, id4) + _pb_len(5, "Windows") + _pb_varint(6, 0))
+            + _pb_len(3, mac) + _pb_varint(4, id4) + _pb_len(5, platform) + _pb_varint(6, 0))
 
 def build_getcode_payload(target_appid: str, *, host_appid: str = "wxd44977328b36e647",
                           sessionkey_val: int = 145715353, mac: str = "34-5A-60-63-65-E6",
@@ -253,14 +255,15 @@ CMDID_GETALLPHONE = 2536            # 取手机号（getallphone，非 js-getuse
 
 def _wxaruntime_envelope(cgi: str, cmdid: int, nested: bytes, target_appid: str,
                          host_appid: str, sessionkey_val: int, mac: str, id4: int,
-                         f8: int, f10: int) -> bytes:
+                         f8: int, f10: int, platform: str = "Windows",
+                         f9_plugin: str = "WindowsxWebPlugin") -> bytes:
     """外层 wxaruntime_transfer 信封（native SendWxaTransferRequest，所有 cgi 通用）:
        f1=sctx · f2=cgi · f3=host · f4=5 · f5=内层req · f6=target · f7=cmdid · f8 · f9 · f10。"""
-    sctx = _session_ctx(sessionkey_val, mac, id4)
+    sctx = _session_ctx(sessionkey_val, mac, id4, platform)
     return (_pb_len(1, sctx) + _pb_len(2, cgi) + _pb_len(3, host_appid)
             + _pb_varint(4, 5) + _pb_len(5, nested) + _pb_len(6, target_appid)
             + _pb_varint(7, cmdid) + _pb_varint(8, f8)
-            + _pb_len(9, "WindowsxWebPlugin") + _pb_varint(10, f10))
+            + _pb_len(9, f9_plugin) + _pb_varint(10, f10))
 
 
 def build_operatewxdata_payload(target_appid: str, data_json: str = "{}", *,
@@ -292,6 +295,51 @@ def build_getphone_payload(target_appid: str, data_json: str = "", *,
                                 host_appid, sessionkey_val, mac, id4, f8, f10)
 
 
+def build_cloud_operatewxdata_payload(target_appid: str, data_json: str, *,
+                                      host_appid: str = "wxd44977328b36e647",
+                                      sessionkey_val: int = 145715353, mac: str = "34-5A-60-63-65-E6",
+                                      id4: int = 1661404927, f8: int = 1610627409,
+                                      f10: int = 573651281,
+                                      platform: str = "Windows",
+                                      f9_plugin: str = "WindowsxWebPlugin") -> bytes:
+    """云函数 / 云托管：js-operatewxdata(cmdid=1133) 的 qbase_commapi 变体。
+      内层 f5 = 普通 operatewxdata 再补云字段：
+        {f1=sctx, f2=appId, f3=data_json,
+         f4="scope.userInfo", f5=1, f6=0, f7=extInfo{f1="", f2=1047, f3=2}}。
+    data_json = 已序列化的 qbase_commapi payload（tcbapi_slowcallfunction_v2 / tcbapi_call_gateway）。
+    对齐 WMPF 抓包（wxhook/server/protocol.py:do_cloud_call_function/do_cloud_call_container 的 is_cloud 分支）。"""
+    sctx = _session_ctx(sessionkey_val, mac, id4, platform)
+    ext_info = _pb_len(1, b"") + _pb_varint(2, 1047) + _pb_varint(3, 2)
+    nested = (_pb_len(1, sctx) + _pb_len(2, target_appid) + _pb_len(3, data_json)
+              + _pb_len(4, "scope.userInfo") + _pb_varint(5, 1) + _pb_varint(6, 0)
+              + _pb_len(7, ext_info))
+    return _wxaruntime_envelope(CGI_OPERATEWXDATA, CMDID_OPERATEWXDATA, nested, target_appid,
+                                host_appid, sessionkey_val, mac, id4, f8, f10, platform, f9_plugin)
+
+
+# 公众号网页 OAuth：对齐 MicroMsg（wechatdll OauthAuthorize.go / mm123.proto）
+#   CGI=/cgi-bin/mmbiz-bin/oauth_authorize  cmdid=1254
+#   Confirm: /cgi-bin/mmbiz-bin/oauth_authorize_confirm cmdid=1255
+# 关键：wxaruntime 外层 f5(nested) 必须是「纯 OauthAuthorizeReq」，
+# 不能像 getphone 那样再套 {sctx, appId, req}，否则服务端读不到 oauthUrl → 10010/10011。
+CGI_OAUTH_AUTHORIZE = "/cgi-bin/mmbiz-bin/oauth_authorize"
+CGI_OAUTH_AUTHORIZE_CONFIRM = "/cgi-bin/mmbiz-bin/oauth_authorize_confirm"
+CMDID_OAUTH_AUTHORIZE = 1254
+CMDID_OAUTH_AUTHORIZE_CONFIRM = 1255
+
+
+def _oauth_base_request() -> bytes:
+    """BaseRequest 占位。WMPF/yyb 通道身份由外层会话承载。"""
+    return (
+        _pb_len(1, b"")
+        + _pb_varint(2, 0)
+        + _pb_len(3, b"")
+        + _pb_varint(4, 0)
+        + _pb_len(5, b"Windows")
+        + _pb_varint(6, 0)
+    )
+
+
 def build_oauth_authorize_payload(target_appid: str, url: str, *,
                                   biz_username: str = "", scene: int = 0,
                                   referrer_url: str = "", sub_scene: int | None = None,
@@ -300,33 +348,25 @@ def build_oauth_authorize_payload(target_appid: str, url: str, *,
                                   sessionkey_val: int = 145715353, mac: str = "34-5A-60-63-65-E6",
                                   id4: int = 1661404927, f8: int = 1610627409,
                                   f10: int = 573651281) -> bytes:
-    """构造 oauth_authorize 请求 payload。
+    """构造 oauth_authorize 请求 payload（cmdid=1254）。
 
-    对应 ilink 路径: /ilink/ilinkapp/mm/bizoauth/oauth_authorize
-    OauthAuthorizeReq 字段:
-      1: url (OAuth2 授权 URL)
-      2: biz_username (业务用户名)
-      3: scene (场景值)
-      4: referrer_url (来源 URL)
-      5: sub_scene (子场景, 可选)
-      6: auto_oauth (自动授权, 可选)
+    OauthAuthorizeReq (mm123.proto):
+      1 BaseRequest
+      2 oauthUrl
+      3 bizUsername
+      4 scene  ← 网页授权常用 4
+    nested = 纯 Req（不要再套 sctx/appid）。
     """
-    sctx = _session_ctx(sessionkey_val, mac, id4)
-    req_body = _pb_len(1, url)
-    if biz_username:
-        req_body += _pb_len(2, biz_username)
-    req_body += _pb_varint(3, scene)
-    if referrer_url:
-        req_body += _pb_len(4, referrer_url)
-    if sub_scene is not None:
-        req_body += _pb_varint(5, sub_scene)
-    if auto_oauth is not None:
-        req_body += _pb_varint(6, 1 if auto_oauth else 0)
-    nested = _pb_len(1, sctx) + _pb_len(2, target_appid) + _pb_len(3, req_body)
-    return (_pb_len(1, sctx) + _pb_len(2, "/ilink/ilinkapp/mm/bizoauth/oauth_authorize")
-            + _pb_len(3, host_appid) + _pb_varint(4, 5) + _pb_len(5, nested)
-            + _pb_len(6, target_appid) + _pb_varint(7, 4313) + _pb_varint(8, f8)
-            + _pb_len(9, "WindowsxWebPlugin") + _pb_varint(10, f10))
+    sc = 4 if not scene else int(scene)
+    req_body = (
+        _pb_len(1, _oauth_base_request())
+        + _pb_len(2, url)
+        + _pb_len(3, biz_username or "")
+        + _pb_varint(4, sc)
+    )
+    return _wxaruntime_envelope(
+        CGI_OAUTH_AUTHORIZE, CMDID_OAUTH_AUTHORIZE, req_body, target_appid,
+        host_appid, sessionkey_val, mac, id4, f8, f10)
 
 
 def build_oauth_authorize_confirm_payload(target_appid: str, oauth_url: str, *,
@@ -337,26 +377,27 @@ def build_oauth_authorize_confirm_payload(target_appid: str, oauth_url: str, *,
                                          mac: str = "34-5A-60-63-65-E6",
                                          id4: int = 1661404927, f8: int = 1610627409,
                                          f10: int = 573651281) -> bytes:
-    """构造 oauth_authorize_confirm 请求 payload。
+    """构造 oauth_authorize_confirm 请求 payload（cmdid=1255）。
 
-    对应 ilink 路径: /ilink/ilinkapp/mm/bizoauth/oauth_authorize_confirm
-    OauthAuthorizeConfirmReq 字段:
-      1: oauth_url (OAuth2 URL)
-      2: opt (操作类型)
-      3: avatar_id (头像 ID)
-      4: redirect_uri (回调地址, OauthAuthorizeConfirmResp.redirect_url 含 code)
+    OauthAuthorizeConfirmReq（与 Authorize 对称，nested 同样是纯 Req）:
+      1 BaseRequest
+      2 oauthUrl
+      3 opt (0=确认)
+      4 avatar_id
+      5 redirect_uri（可选）
     """
-    sctx = _session_ctx(sessionkey_val, mac, id4)
-    req_body = _pb_len(1, oauth_url) + _pb_varint(2, opt)
+    req_body = (
+        _pb_len(1, _oauth_base_request())
+        + _pb_len(2, oauth_url)
+        + _pb_varint(3, int(opt or 0))
+    )
     if avatar_id:
-        req_body += _pb_len(3, avatar_id)
+        req_body += _pb_len(4, avatar_id)
     if redirect_uri:
-        req_body += _pb_len(4, redirect_uri)
-    nested = _pb_len(1, sctx) + _pb_len(2, target_appid) + _pb_len(3, req_body)
-    return (_pb_len(1, sctx) + _pb_len(2, "/ilink/ilinkapp/mm/bizoauth/oauth_authorize_confirm")
-            + _pb_len(3, host_appid) + _pb_varint(4, 5) + _pb_len(5, nested)
-            + _pb_len(6, target_appid) + _pb_varint(7, 4313) + _pb_varint(8, f8)
-            + _pb_len(9, "WindowsxWebPlugin") + _pb_varint(10, f10))
+        req_body += _pb_len(5, redirect_uri)
+    return _wxaruntime_envelope(
+        CGI_OAUTH_AUTHORIZE_CONFIRM, CMDID_OAUTH_AUTHORIZE_CONFIRM, req_body, target_appid,
+        host_appid, sessionkey_val, mac, id4, f8, f10)
 
 
 if __name__ == "__main__":
