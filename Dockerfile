@@ -2,7 +2,8 @@
 FROM node:22-bookworm-slim AS web-builder
 WORKDIR /src
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm config set registry https://registry.npmmirror.com \
+    && npm ci --prefer-offline || npm ci
 COPY web ./web
 RUN npm run build:web
 
@@ -10,10 +11,10 @@ FROM python:3.11-slim-bookworm
 
 ARG VERSION=dev
 ARG VCS_REF=unknown
-ARG SOURCE_URL=https://github.com/zhuanke8/yyb
+ARG SOURCE_URL=https://github.com/afong166/yyb
 
-LABEL org.opencontainers.image.title="YYB pure protocol service" \
-      org.opencontainers.image.description="FastAPI YYB service with shared 51daili short-lived SOCKS5 support" \
+LABEL org.opencontainers.image.title="YYB 应用宝 ARMv7 多架构" \
+      org.opencontainers.image.description="应用宝取码服务 · 支持 ARMv7/arm64/amd64 三架构" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.source="${SOURCE_URL}"
@@ -28,7 +29,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     YYB_TRUST_PROXY=0
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates gosu nodejs \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates gosu curl \
+        libcurl4-openssl-dev libbrotli-dev libkrb5-dev \
+        libssl3 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app --home-dir /app --shell /usr/sbin/nologin app
@@ -47,6 +51,7 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN mkdir -p /data \
     && chown app:app /data \
     && chmod 0755 /usr/local/bin/docker-entrypoint.sh
+
 VOLUME ["/data"]
 EXPOSE 18273
 
