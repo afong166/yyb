@@ -34,6 +34,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates gosu curl \
         libcurl4-openssl-dev libbrotli-dev libkrb5-dev \
+        libuv1-dev libffi-dev libssl-dev \
+        python3-dev build-essential \
+        gcc g++ make \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app --home-dir /app --shell /usr/sbin/nologin app
