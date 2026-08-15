@@ -10,4 +10,4 @@ segno>=1.6
 requests[socks]>=2.31
 python-multipart>=0.0.9
 pycryptodome>=3.20
-curl_cffi>=0.7
+
